@@ -1,5 +1,7 @@
 use todo_app_spec::*;
 use app_backend::praxis::has_permission;
+use nocodo_praxis::auth::RoleId;
+use nocodo_praxis::statemachine::{StateId, TransitionCondition, Transitions};
 
 fn role_refs(roles: &[Role]) -> Vec<&Role> {
     roles.iter().collect()
@@ -211,4 +213,100 @@ fn cancelled_can_be_reopened() {
     let all = all_roles();
     let refs = role_refs(&all);
     assert!(can_transition(S_CANCELLED, S_TODO, &[ROLE_ADMIN], &refs));
+}
+
+// ── Integration-Style: Spec + Runtime Checks ──────────────────────────────────
+//
+// These tests demonstrate how a controller would compose:
+//   1. Spec check (can_transition — roles, permissions, transition validity)
+//   2. Runtime check (OnlyIfAssignedToSelf — is the user the task's assignee?)
+//
+// The spec encodes the rule; the controller enriches it with runtime data.
+
+struct Task {
+    assignee_id: u64,
+}
+
+fn can_user_transition_task(
+    task: &Task,
+    user_id: u64,
+    from: StateId,
+    to: StateId,
+    user_roles: &[RoleId],
+    all_roles: &[&Role],
+) -> bool {
+    // Step 1 — structural check: does the spec allow this transition for this role?
+    if !can_transition(from, to, user_roles, all_roles) {
+        return false;
+    }
+
+    // Step 2 — runtime check: OnlyIfAssignedToSelf means the user must be the assignee.
+    // The spec captures this as TransitionCondition, but can't resolve assignee data.
+    // The controller reads the task from the DB and checks ownership here.
+    let states = task_states();
+    let state = match nocodo_praxis::statemachine::find_state(&from, &states) {
+        Some(s) => s,
+        None => return false,
+    };
+    if let Transitions::To(list) = &state.transitions {
+        for t in list.all() {
+            if t.to == to {
+                if matches!(t.condition, TransitionCondition::OnlyIfAssignedToSelf) {
+                    return task.assignee_id == user_id;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn member_can_start_own_task() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    let task = Task { assignee_id: 42 };
+    assert!(can_user_transition_task(
+        &task, 42, S_TODO, S_IN_PROGRESS, &[ROLE_MEMBER], &refs,
+    ));
+}
+
+#[test]
+fn member_cannot_start_someone_elses_task() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    let task = Task { assignee_id: 99 };
+    assert!(!can_user_transition_task(
+        &task, 42, S_TODO, S_IN_PROGRESS, &[ROLE_MEMBER], &refs,
+    ));
+}
+
+#[test]
+fn member_cannot_complete_someone_elses_task() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    let task = Task { assignee_id: 99 };
+    assert!(!can_user_transition_task(
+        &task, 42, S_IN_PROGRESS, S_DONE, &[ROLE_MEMBER], &refs,
+    ));
+}
+
+#[test]
+fn admin_can_cancel_any_task_regardless_of_assignee() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    let task = Task { assignee_id: 99 };
+    assert!(can_user_transition_task(
+        &task, 42, S_TODO, S_CANCELLED, &[ROLE_ADMIN], &refs,
+    ));
+}
+
+#[test]
+fn assignee_check_bypassed_when_condition_is_always() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    let task = Task { assignee_id: 99 };
+    assert!(can_user_transition_task(
+        &task, 42, S_IN_PROGRESS, S_CANCELLED, &[ROLE_ADMIN], &refs,
+    ));
 }

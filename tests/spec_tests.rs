@@ -162,3 +162,66 @@ fn valid_transitions_from_terminal_are_empty() {
     assert!(valid_transitions(TaskState::Done).is_empty());
     assert!(valid_transitions(TaskState::Cancelled).is_empty());
 }
+
+// ── Provenance Tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn view_all_tasks_has_inferred_provenance() {
+    let all = all_roles();
+    let auth_role = all.iter().find(|r| r.id == ROLE_ALL_AUTHENTICATED).unwrap();
+    let first_prov = &auth_role.provenance.head;
+    assert!(
+        matches!(first_prov, nocodo_praxis::provenance::Provenance::Inferred { .. }),
+        "view_all_tasks should have Inferred provenance, not stated in PRD"
+    );
+}
+
+// ── Unresolved State Machine Tests ─────────────────────────────────────────────
+
+#[test]
+fn unresolved_transitions_exist_and_are_pending() {
+    let unresolved = unresolved_transitions();
+    assert!(!unresolved.is_empty(), "PRD has open questions that should be tracked");
+    for (_, _, t) in &unresolved {
+        assert!(t.blocks_codegen(), "every unresolved transition should block codegen");
+        assert!(t.reason().is_some(), "every unresolved transition should have a reason");
+    }
+}
+
+#[test]
+fn unresolved_transitions_are_not_in_resolved_set() {
+    let unresolved = unresolved_transitions();
+    for (from, transition, _) in &unresolved {
+        assert!(
+            apply_transition(*from, *transition).is_none(),
+            "unresolved transition {:?} -> {:?} should not be in TRANSITIONS",
+            from, transition
+        );
+    }
+}
+
+#[test]
+#[ignore = "UNRESOLVED: PRD does not specify whether in_progress tasks can revert to todo"]
+fn in_progress_can_revert_to_todo() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    assert!(can_transition(
+        TaskState::InProgress,
+        TaskTransition::Unstart,
+        &[ROLE_MEMBER],
+        &refs,
+    ));
+}
+
+#[test]
+#[ignore = "UNRESOLVED: PRD does not specify whether cancelled tasks can be reopened"]
+fn cancelled_can_be_reopened() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    assert!(can_transition(
+        TaskState::Cancelled,
+        TaskTransition::Reopen,
+        &[ROLE_ADMIN],
+        &refs,
+    ));
+}

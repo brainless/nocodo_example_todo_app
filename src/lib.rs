@@ -1,6 +1,6 @@
 use nocodo_praxis::auth::{PermissionId, RoleId, RoleSemantics};
 use nocodo_praxis::provenance::Provenance;
-use nocodo_praxis::primitives::AtLeastOne;
+use nocodo_praxis::primitives::{AtLeastOne, Unresolved};
 use app_backend::praxis::has_permission;
 
 pub use nocodo_praxis::auth::Role;
@@ -14,8 +14,17 @@ const PRD_CONVERSATION: Provenance = Provenance::Conversation {
                out, assign to anyone.",
 };
 
+const INFERRED_VIEW_ALL: Provenance = Provenance::Inferred {
+    reason: "Team coordination requires shared visibility",
+    from: &["prd-init"],
+};
+
 fn prov() -> AtLeastOne<Provenance> {
     AtLeastOne { head: PRD_CONVERSATION, tail: &[] }
+}
+
+fn prov_inferred() -> AtLeastOne<Provenance> {
+    AtLeastOne { head: INFERRED_VIEW_ALL, tail: &[] }
 }
 
 // ── Permissions ────────────────────────────────────────────────────────────────
@@ -41,7 +50,7 @@ pub fn all_roles() -> [Role; 3] {
             semantics: RoleSemantics::Flat,
             permissions: &[PERM_VIEW_ALL_TASKS],
             personas: &[],
-            provenance: prov(),
+            provenance: prov_inferred(),
         },
         Role {
             id: ROLE_MEMBER,
@@ -83,15 +92,17 @@ pub enum TaskTransition {
     Start,
     Complete,
     Cancel,
+    Unstart,
     Reopen,
 }
 
 impl TaskTransition {
     pub fn required_permission(self) -> PermissionId {
         match self {
-            TaskTransition::Start | TaskTransition::Complete => PERM_UPDATE_OWN_TASK_STATUS,
-            TaskTransition::Cancel => PERM_ASSIGN_TASK_TO_ANYONE,
-            TaskTransition::Reopen => PERM_ASSIGN_TASK_TO_ANYONE,
+            TaskTransition::Start | TaskTransition::Complete | TaskTransition::Unstart => {
+                PERM_UPDATE_OWN_TASK_STATUS
+            }
+            TaskTransition::Cancel | TaskTransition::Reopen => PERM_ASSIGN_TASK_TO_ANYONE,
         }
     }
 }
@@ -102,6 +113,42 @@ const TRANSITIONS: &[(TaskState, TaskTransition, TaskState)] = &[
     (TaskState::Todo, TaskTransition::Cancel, TaskState::Cancelled),
     (TaskState::InProgress, TaskTransition::Cancel, TaskState::Cancelled),
 ];
+
+/// Transitions that need PRD clarification before they can be added to TRANSITIONS.
+pub fn unresolved_transitions() -> Vec<(TaskState, TaskTransition, Unresolved<TaskState>)> {
+    let inferred_unstart = Provenance::Inferred {
+        reason: "Common product pattern; not stated in PRD",
+        from: &["prd-init"],
+    };
+    let inferred_reopen = Provenance::Inferred {
+        reason: "Common product pattern; not stated in PRD",
+        from: &["prd-init"],
+    };
+    vec![
+        (
+            TaskState::InProgress,
+            TaskTransition::Unstart,
+            Unresolved::Pending {
+                reason: "PRD does not specify whether in_progress tasks can revert to todo",
+                provenance: AtLeastOne {
+                    head: inferred_unstart,
+                    tail: &[],
+                },
+            },
+        ),
+        (
+            TaskState::Cancelled,
+            TaskTransition::Reopen,
+            Unresolved::Pending {
+                reason: "PRD does not specify whether cancelled tasks can be reopened",
+                provenance: AtLeastOne {
+                    head: inferred_reopen,
+                    tail: &[],
+                },
+            },
+        ),
+    ]
+}
 
 pub fn can_transition(
     from: TaskState,

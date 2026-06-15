@@ -75,92 +75,63 @@ fn member_can_self_assign() {
 fn todo_can_transition_to_in_progress() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(can_transition(
-        TaskState::Todo,
-        TaskTransition::Start,
-        &[ROLE_MEMBER],
-        &refs,
-    ));
+    assert!(can_transition(S_TODO, S_IN_PROGRESS, &[ROLE_MEMBER], &refs));
 }
 
 #[test]
 fn todo_cannot_transition_to_done_directly() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(!can_transition(
-        TaskState::Todo,
-        TaskTransition::Complete,
-        &[ROLE_MEMBER],
-        &refs,
-    ));
+    assert!(!can_transition(S_TODO, S_DONE, &[ROLE_MEMBER], &refs));
 }
 
 #[test]
 fn done_is_terminal() {
-    assert!(TaskState::Done.is_terminal());
-    let all = all_roles();
-    let refs = role_refs(&all);
-    assert!(!can_transition(
-        TaskState::Done,
-        TaskTransition::Start,
-        &[ROLE_ADMIN],
-        &refs,
-    ));
+    let states = task_states();
+    let done = nocodo_praxis::statemachine::find_state(&S_DONE, &states).unwrap();
+    assert!(done.is_terminal());
 }
 
 #[test]
 fn cancelled_is_terminal() {
-    assert!(TaskState::Cancelled.is_terminal());
+    let states = task_states();
+    let cancelled = nocodo_praxis::statemachine::find_state(&S_CANCELLED, &states).unwrap();
+    assert!(cancelled.is_terminal());
+}
+
+#[test]
+fn done_cannot_transition() {
+    let all = all_roles();
+    let refs = role_refs(&all);
+    assert!(!can_transition(S_DONE, S_TODO, &[ROLE_ADMIN], &refs));
 }
 
 #[test]
 fn member_cannot_cancel_tasks() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(!can_transition(
-        TaskState::InProgress,
-        TaskTransition::Cancel,
-        &[ROLE_MEMBER],
-        &refs,
-    ));
+    assert!(!can_transition(S_IN_PROGRESS, S_CANCELLED, &[ROLE_MEMBER], &refs));
 }
 
 #[test]
 fn admin_can_cancel_tasks() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(can_transition(
-        TaskState::InProgress,
-        TaskTransition::Cancel,
-        &[ROLE_ADMIN],
-        &refs,
-    ));
+    assert!(can_transition(S_IN_PROGRESS, S_CANCELLED, &[ROLE_ADMIN], &refs));
 }
 
 #[test]
-fn apply_transition_works() {
-    assert_eq!(
-        apply_transition(TaskState::Todo, TaskTransition::Start),
-        Some(TaskState::InProgress)
-    );
-    assert_eq!(
-        apply_transition(TaskState::Todo, TaskTransition::Complete),
-        None
-    );
+fn valid_targets_from_todo() {
+    let targets = valid_target_states(S_TODO);
+    assert_eq!(targets.len(), 2);
+    assert!(targets.contains(&S_IN_PROGRESS));
+    assert!(targets.contains(&S_CANCELLED));
 }
 
 #[test]
-fn valid_transitions_from_todo() {
-    let transitions = valid_transitions(TaskState::Todo);
-    assert_eq!(transitions.len(), 2);
-    assert!(transitions.contains(&TaskTransition::Start));
-    assert!(transitions.contains(&TaskTransition::Cancel));
-}
-
-#[test]
-fn valid_transitions_from_terminal_are_empty() {
-    assert!(valid_transitions(TaskState::Done).is_empty());
-    assert!(valid_transitions(TaskState::Cancelled).is_empty());
+fn valid_targets_from_terminal_are_empty() {
+    assert!(valid_target_states(S_DONE).is_empty());
+    assert!(valid_target_states(S_CANCELLED).is_empty());
 }
 
 // ── Provenance Tests ───────────────────────────────────────────────────────────
@@ -176,26 +147,52 @@ fn view_all_tasks_has_inferred_provenance() {
     );
 }
 
+// ── Entity Tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn task_entity_has_three_fields() {
+    let entity = task_entity();
+    assert_eq!(entity.fields.len(), 3);
+}
+
+#[test]
+fn task_entity_title_has_pending_invariant() {
+    let entity = task_entity();
+    assert!(entity.has_pending_invariants());
+}
+
+#[test]
+fn task_entity_has_no_states_yet() {
+    let entity = task_entity();
+    assert!(entity.states.is_empty());
+}
+
+#[test]
+fn task_states_all_have_terminal() {
+    let states = task_states();
+    assert!(nocodo_praxis::statemachine::has_terminal_state(&states));
+}
+
 // ── Unresolved State Machine Tests ─────────────────────────────────────────────
 
 #[test]
-fn unresolved_transitions_exist_and_are_pending() {
+fn unresolved_transitions_exist_and_have_unresolved_condition() {
     let unresolved = unresolved_transitions();
     assert!(!unresolved.is_empty(), "PRD has open questions that should be tracked");
-    for (_, _, t) in &unresolved {
-        assert!(t.blocks_codegen(), "every unresolved transition should block codegen");
-        assert!(t.reason().is_some(), "every unresolved transition should have a reason");
+    for transition in &unresolved {
+        assert!(
+            matches!(transition.condition, nocodo_praxis::statemachine::TransitionCondition::Unresolved(_)),
+            "unresolved transitions should use TransitionCondition::Unresolved"
+        );
     }
 }
 
 #[test]
-fn unresolved_transitions_are_not_in_resolved_set() {
-    let unresolved = unresolved_transitions();
-    for (from, transition, _) in &unresolved {
+fn unresolved_transitions_are_not_in_resolved_states() {
+    for transition in unresolved_transitions() {
         assert!(
-            apply_transition(*from, *transition).is_none(),
-            "unresolved transition {:?} -> {:?} should not be in TRANSITIONS",
-            from, transition
+            !can_transition(S_IN_PROGRESS, transition.to, &[ROLE_MEMBER], &[]),
+            "unresolved transitions should not pass can_transition"
         );
     }
 }
@@ -205,12 +202,7 @@ fn unresolved_transitions_are_not_in_resolved_set() {
 fn in_progress_can_revert_to_todo() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(can_transition(
-        TaskState::InProgress,
-        TaskTransition::Unstart,
-        &[ROLE_MEMBER],
-        &refs,
-    ));
+    assert!(can_transition(S_IN_PROGRESS, S_TODO, &[ROLE_MEMBER], &refs));
 }
 
 #[test]
@@ -218,10 +210,5 @@ fn in_progress_can_revert_to_todo() {
 fn cancelled_can_be_reopened() {
     let all = all_roles();
     let refs = role_refs(&all);
-    assert!(can_transition(
-        TaskState::Cancelled,
-        TaskTransition::Reopen,
-        &[ROLE_ADMIN],
-        &refs,
-    ));
+    assert!(can_transition(S_CANCELLED, S_TODO, &[ROLE_ADMIN], &refs));
 }

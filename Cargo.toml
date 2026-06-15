@@ -1,0 +1,8 @@
+[package]
+name = "todo_app_spec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nocodo_praxis = { path = "../../Projects/nocodo/nocodo_praxis" }
+app-backend = { path = "../../Projects/rustysolid/backend" }
